@@ -464,12 +464,30 @@ function widgetMain(global) {
     var seg = null;
     if (t.charAt(0) === '>') seg = t;
     else { var i = t.indexOf('>"'); if (i >= 0) seg = t.slice(i); }
-    if (!seg) return;
-    var st = parseFrame(seg);
-    if (!st) return;
-    onFrame(st);
+    if (seg) {
+      var st = parseFrame(seg);
+      if (st) { onFrame(st); passTop(t); return; }
+    }
+    // 文本行情兜底：房间/机器人推送的「股价提醒」类消息（股价：x 总股：n 总金：y）
+    var mPrice = /股价：([\d.]+)/.exec(t);
+    var mStock = /总股：([\d,]+)/.exec(t);
+    var mMoney = /总金：([\d.,]+)/.exec(t);
+    if (mPrice && mStock && mMoney) {
+      var pv = parseFloat(mPrice[1]);
+      var sv = parseFloat(String(mStock[1]).replace(/,/g, ''));
+      var mv = parseFloat(String(mMoney[1]).replace(/,/g, ''));
+      if (!isNaN(pv) && !isNaN(sv) && !isNaN(mv) && sv > 0 && pv > 0) {
+        onFrame({
+          totalStock: Math.round(sv), totalMoney: mv, unitPrice: pv,
+          personalStock: null, personalMoney: null, hasPrice: true
+        });
+        passTop(t);
+      }
+    }
+  }
+  function passTop(t) {
     if (!isTop) {
-      try { (global.top || global.parent || global).postMessage({ __iiStockWidget: true, frame: seg }, '*'); } catch (e) {}
+      try { (global.top || global.parent || global).postMessage({ __iiStockWidget: true, frame: t }, '*'); } catch (e) {}
     }
   }
 
@@ -602,10 +620,10 @@ function widgetMain(global) {
     });
   }
 
-  // 存量 socket 补救：插件晚于 WS 创建时加载（APK/网页常见），对已连接实例直接挂监听
-  function patchExistingWS() {
+  // 存量 socket 补救：插件晚于 WS 创建时加载（APK/网页常见），对已连接实例直接挂监听。
+  // 顶层兜底场景：socket 在 iframe(mainFrame) 内——跨窗口 addEventListener 同源可行，统一扫描所有 iframe
+  function hookSocket(s) {
     try {
-      var s = global.socket || global.ws || global.Socket;
       if (!s || typeof s.addEventListener !== 'function' || s.readyState !== 1) return false;
       if (s.__iwHooked) return true;
       s.__iwHooked = true;
@@ -621,6 +639,25 @@ function widgetMain(global) {
         s._iwQueryTimer = setInterval(function () { try { s.send('>#'); } catch (e) {} }, 60000);
       }
       return true;
+    } catch (e) { return false; }
+  }
+  function patchExistingWS() {
+    try {
+      var done = hookSocket(global.socket || global.ws || global.Socket);
+      // 顶层：扫描所有 iframe 内的 socket（APK 兜底面板场景）
+      try {
+        if (global.document && global.document.querySelectorAll) {
+          var fs = global.document.querySelectorAll('iframe');
+          for (var i = 0; i < fs.length; i++) {
+            try {
+              var fw = fs[i].contentWindow;
+              if (fw && fw.socket && hookSocket(fw.socket)) done = true;
+              if (fw && fw.ws && hookSocket(fw.ws)) done = true;
+            } catch (e2) {}
+          }
+        }
+      } catch (e3) {}
+      return done;
     } catch (e) { return false; }
   }
 
@@ -664,7 +701,7 @@ function widgetMain(global) {
   return {
     autoStart: autoStart,
     mount: function (container, opts) { autoStart(); if (container) { container.appendChild(WIDGET || document.querySelector('.iw-wrap')); } },
-    pushFrame: function (text) { var st = parseFrame(text); if (st) onFrame(st); return !!st; },
+    pushFrame: function (text) { handleText(text); },
     getState: function () { return S; },
     exportAll: exportAll,
     parseFrame: parseFrame,
