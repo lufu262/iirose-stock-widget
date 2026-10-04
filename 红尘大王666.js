@@ -693,7 +693,7 @@ function widgetMain(global) {
     S.diag.fetch = true;
   }
 
-  // 通道4：iframe 转发接收（顶层监听）
+  // 通道4：iframe 转发接收（顶层监听，统一走 handleText 去重+解析，兼容 > 帧与文本行情帧）
   function listenBridge() {
     if (!isTop) return;
     S.diag.bridge = true;
@@ -701,8 +701,7 @@ function widgetMain(global) {
       try {
         var d = e.data;
         if (d && d.__iiStockWidget && typeof d.frame === 'string') {
-          var st = parseFrame(d.frame);
-          if (st) onFrame(st);
+          handleText(d.frame);
         }
       } catch (e2) {}
     });
@@ -832,7 +831,33 @@ function widgetMain(global) {
     patchWS(); patchXHR(); patchFetch(); listenBridge(); patchDOM();
     patchExistingWS();
     activeQuery();
+    if (isTop) topScan();
     return 'ws+xhr';
+  }
+
+  // 顶层文档扫描：网页/APK 的「股价提醒」常挂在主页面顶层（非聊天 iframe），
+  // 每秒轮询顶层 body，抓到行情帧后转发给 iframe 内面板（listenBridge 接收）
+  function topScan() {
+    if (!isTop) return;
+    var scan = function () {
+      try {
+        var b = (global.document.body || global.document.documentElement);
+        if (!b) return;
+        var txt = b.innerText || '';
+        if (/股价[:：]/.test(txt)) {
+          var idx = txt.lastIndexOf('股价');
+          var chunk = txt.slice(Math.max(0, idx - 80), Math.min(txt.length, idx + 400));
+          handleText(chunk);
+          try {
+            var fs = global.document.querySelectorAll('iframe');
+            for (var i = 0; i < fs.length; i++) {
+              try { fs[i].contentWindow.postMessage({ __iiStockWidget: true, frame: chunk }, '*'); } catch (e) {}
+            }
+          } catch (e2) {}
+        }
+      } catch (e) {}
+    };
+    global.setInterval(scan, 1000);
   }
 
   /* ---------------- 启动 ---------------- */
