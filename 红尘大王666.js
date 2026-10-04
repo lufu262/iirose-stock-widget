@@ -54,7 +54,7 @@ function widgetMain(global) {
     lastEvt: '—',
     lastTsText: '—',
     connText: '等待数据…',
-    diag: { wsPatch: false, wsTop: false, wsFrame: false, xhr: false, fetch: false, bridge: false, dom: false, frames: 0, texts: 0, errors: 0, wsInstances: 0, rawMsgs: 0, iframes: 0, socketVar: false }
+    diag: { wsPatch: false, wsTop: false, wsFrame: false, xhr: false, fetch: false, bridge: false, dom: false, frames: 0, domFrames: 0, texts: 0, errors: 0, wsInstances: 0, rawMsgs: 0, iframes: 0, socketVar: false, deepWs: 0, nativeBridge: null }
   };
 
   /* ---------------- 帧解析 ---------------- */
@@ -259,7 +259,17 @@ function widgetMain(global) {
         var y = key === 'p' ? yOfPrice(Number(arr[i])) : yOf(Number(arr[i]), arr);
         pts.push(x.toFixed(1) + ',' + y.toFixed(1));
       }
-      if (pts.length < 2) return null;
+      if (pts.length < 2) {
+        // 单点也画：圆点示意（数据刚起步）
+        if (pts.length === 1) {
+          var cc = ns('circle');
+          var xy = pts[0].split(',');
+          cc.setAttribute('cx', xy[0]); cc.setAttribute('cy', xy[1]); cc.setAttribute('r', 2.5);
+          cc.setAttribute('fill', color);
+          return cc;
+        }
+        return null;
+      }
       var pl = ns('polyline');
       pl.setAttribute('points', pts.join(' '));
       pl.setAttribute('fill', 'none'); pl.setAttribute('stroke', color); pl.setAttribute('stroke-width', wdt);
@@ -422,8 +432,11 @@ function widgetMain(global) {
       if (d.socketVar) parts.push('socket变量✓');
       var extra = [];
       if (d.wsInstances > 0) extra.push('WS' + d.wsInstances);
+      if (d.deepWs > 0) extra.push('深' + d.deepWs);
       if (d.rawMsgs > 0) extra.push('原始' + d.rawMsgs);
+      if (d.domFrames > 0) extra.push('dom帧' + d.domFrames);
       if (d.iframes > 0) extra.push('帧数' + d.iframes);
+      if (d.nativeBridge) extra.push('桥:' + d.nativeBridge);
       $('iwDiag').textContent = (parts.length ? parts.join(' ') : '无通道!') + (extra.length ? ' ' + extra.join(' ') : '') + ' 帧' + d.frames;
       $('iwDiag').style.color = d.frames > 0 ? '#6ee7a0' : '#f87171';
     }
@@ -499,6 +512,7 @@ function widgetMain(global) {
       var sv = parseFloat(String(mStock[1]).replace(/,/g, ''));
       var mv = parseFloat(String(mMoney[1]).replace(/,/g, ''));
       if (!isNaN(pv) && !isNaN(sv) && !isNaN(mv) && sv > 0 && pv > 0) {
+        S.diag.domFrames++;
         onFrame({
           totalStock: Math.round(sv), totalMoney: mv, unitPrice: pv,
           personalStock: null, personalMoney: null, hasPrice: true
@@ -729,6 +743,26 @@ function widgetMain(global) {
       var done = false;
       var s = findWS(global);
       if (s) done = hookSocket(s, tag);
+      // 深枚举：非可枚举属性（Object.getOwnPropertyNames）里的连接对象——覆盖打包/闭包挂载的 socket
+      try {
+        var names = Object.getOwnPropertyNames(global);
+        for (var ni = 0; ni < names.length; ni++) {
+          try {
+            var nv = global[names[ni]];
+            if (!nv || typeof nv !== 'object') continue;
+            if (nv.readyState === 1 && (Object.prototype.toString.call(nv) === '[object WebSocket]' || (typeof nv.send === 'function' && typeof nv.addEventListener === 'function'))) {
+              if (hookSocket(nv, tag)) { done = true; S.diag.deepWs = (S.diag.deepWs || 0) + 1; }
+            }
+          } catch (e9) {}
+        }
+      } catch (e8) {}
+      // 原生桥探测（APK WebView 常见）：行情可能由原生 Java 层推送
+      try {
+        var bnames = ['IIROSE', 'iirose', 'android', 'AndroidBridge', 'WebViewJavascriptBridge', 'JSBridge', '_bridge', 'iirBridge', 'nativeBridge'];
+        for (var bi = 0; bi < bnames.length; bi++) {
+          if (typeof global[bnames[bi]] !== 'undefined') { S.diag.nativeBridge = bnames[bi]; break; }
+        }
+      } catch (e7) {}
       // 顶层：扫描所有 iframe 内的 socket（APK 兜底面板场景）
       if (isTop) {
         try {
