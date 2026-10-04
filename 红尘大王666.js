@@ -11,25 +11,9 @@
 // @grant        none
 // ==/UserScript==
 
-/* ============================================================
- * iirose 股票走势图插件（单文件、零依赖、三端通用）
- * - 网页版：Tampermonkey 安装（上方元数据，已含 iframe 注入），自动捕获页面行情
- * - 桌面版：iirose Electron 壳（加载同一 https://iirose.com），
- *   打开 DevTools（F12）→ Console → 粘贴本文件全部代码回车即可
- * - APK/WebView：把本文件放入工程 www/ 目录后 <script src> 引入，
- *   宿主可通过 window.iiStockSource = fn(text) 推送行情帧
- *
- * 数据源（网页版实测）：iirose 网页版股票数据走 XHR 轮询接口，且房间内容
- *   在 iframe 内，部分实时通道走 WebSocket——插件同时补丁 XHR / fetch /
- *   WebSocket 三条通道（含 iframe，捕获后 postMessage 转发顶层），
- *   自动识别任意通道返回的行情帧，无需配置。
- *
- * 协议（iirose 股票行情帧，与红尘大王666 2.0 一致）：
- *   '>'"总股>总金>[新股价]>个人股>个人金'   —— 按引号 split：5 段=股价变动帧
- *   4 段=平盘帧（沿用上次股价）；'>#'=查询；'>$n'=买入；'>@n'=卖出
- *   本轮起点：股价=1、总股=1000、总金=1000；崩盘重置判定：
- *   unitPrice===1 && totalStock===1000
- * ============================================================ */
+/* iirose 股票走势图插件（单文件、零依赖）。
+ * 行情帧：'">"总股>总金>[新股价]>个人股>个人金'（5段=股价变动，4段=平盘沿用上次价）。
+ * 本轮起点：股价=1、总股=1000、总金=1000；崩盘重置=股价1且总股1000。 */
 function widgetMain(global) {
   'use strict';
 
@@ -42,7 +26,6 @@ function widgetMain(global) {
     intervalW: 0.7,         // 距下次变动：中位数权重
     intervalLast: 0.3       // 距下次变动：最近一次权重
   };
-  var RANGE_LABEL = { round: '当前轮', 5: '近5跳', 10: '近10跳' };
 
   /* ---------------- 工具函数 ---------------- */
   function $(id) { return document.getElementById(id); }
@@ -68,7 +51,6 @@ function widgetMain(global) {
     round: [],              // 当前轮记录
     savedRounds: [],        // 已封存的完整轮 [{start,end,ticks}]
     intervals: [],          // 股价变化间隔序列（ms）
-    range: 'round',         // 走势范围
     lastEvt: '—',
     lastTsText: '—',
     connText: '等待数据…'
@@ -167,24 +149,10 @@ function widgetMain(global) {
   /* ---------------- 走势数据 ---------------- */
   function buildSeries() {
     var base = S.ticks;
-    if (S.range === 'round') {
-      var rIdx = -1;
-      for (var i = base.length - 1; i >= 0; i--) { if (base[i].event === 'R') { rIdx = i; break; } }
-      if (rIdx >= 0) base = base.slice(rIdx);
-      else base = base.slice(-CFG.maxPoints);
-    } else if (typeof S.range === 'number' && S.range > 0) {
-      // 近 N 跳 = 最近 N 次股价变化：先压成 priceSeq 再截尾
-      var ps = priceSeq(base);
-      base = base.slice(Math.max(0, base.length - S.range * 3)); // 取足够原始段，下方再严格截
-      var ps2 = priceSeq(base);
-      var lastN = ps2.slice(-S.range);
-      if (lastN.length) {
-        var cutTs = lastN[0].ts;
-        var idx = 0;
-        for (; idx < base.length; idx++) if (base[idx].ts >= cutTs) break;
-        base = base.slice(idx);
-      }
-    }
+    var rIdx = -1;
+    for (var i = base.length - 1; i >= 0; i--) { if (base[i].event === 'R') { rIdx = i; break; } }
+    if (rIdx >= 0) base = base.slice(rIdx);
+    else base = base.slice(-CFG.maxPoints);
     // 每次股价变化 = 一个数据点；同一价格内多次变化只留最新
     var ps = priceSeq(base);
     if (ps.length > CFG.maxPoints) ps = ps.slice(-CFG.maxPoints);
@@ -375,9 +343,6 @@ function widgetMain(global) {
       '.iw-cards{display:flex;gap:6px;margin-bottom:6px}' +
       '.iw-card{flex:1;background:#151a2b;border:1px solid #232a45;border-radius:8px;padding:6px;text-align:center}' +
       '.iw-card .k{font-size:10px;color:#8b93a7}.iw-card .v{font-size:14px;font-weight:700;margin-top:1px}.iw-card .v.gold{color:#f0c75e}.iw-card .d{font-size:9.5px;color:#64748b}' +
-      '.iw-tools{display:flex;align-items:center;gap:5px}' +
-      '.iw-chip{padding:3px 10px;font-size:11px;border:1px solid #2a2f45;background:#1a1f33;color:#cbd5e1;border-radius:6px;cursor:pointer}' +
-      '.iw-chip.iw-on{background:#f0c75e;color:#111827;border-color:#f0c75e;font-weight:600}' +
       '.iw-author{padding:4px 8px;font-size:11px;color:#8b93a7;text-align:center;border-top:1px solid rgba(212,175,55,.22);margin-top:4px;letter-spacing:.5px}' +
       '.iw-author span{color:#f0c75e;font-weight:700}' +
       '.iw-mini{display:none;width:100%;height:100%;border-radius:14px;object-fit:cover;cursor:pointer}' +
@@ -470,11 +435,11 @@ function widgetMain(global) {
     setTimeout(function () { URL.revokeObjectURL(a.href); a.remove(); }, 800);
   }
 
-  /* ---------------- 数据源适配（网页版实测：股票数据走 XHR 轮询 + 可能 iframe 内 WebSocket，需多通道全捕获） ---------------- */
+  /* ---------------- 数据源适配（多通道全捕获：WebSocket / XHR / fetch / iframe 转发） ---------------- */
   var isTop = true;
   try { isTop = global.self === global.top || global.top === global.self; } catch (e) { isTop = true; }
 
-  // 统一入口：识别行情文本 → 本地入库渲染（iframe 内同样挂面板）；非顶层同时转发顶层备用
+  // 统一入口：识别行情文本 → 本地入库渲染；非顶层同时转发顶层备用
   function handleText(t) {
     if (typeof t !== 'string') return;
     var seg = null;
@@ -489,7 +454,7 @@ function widgetMain(global) {
     }
   }
 
-  // 通道1：补丁 WebSocket（覆盖 iframe 内实例；消息为 string 时识别）
+  // 通道1：补丁 WebSocket
   function patchWS() {
     var proto = global.WebSocket;
     if (!proto || proto._iirosePatched) return;
@@ -520,7 +485,7 @@ function widgetMain(global) {
     global.WebSocket = PWS;
   }
 
-  // 通道2：补丁 XMLHttpRequest 原型（拦截 load 后检查响应文本，不影响页面原逻辑）
+  // 通道2：补丁 XMLHttpRequest
   function patchXHR() {
     var X = global.XMLHttpRequest;
     if (!X || !X.prototype || X.prototype._iirosePatched) return;
@@ -541,7 +506,7 @@ function widgetMain(global) {
     X.prototype._iirosePatched = true;
   }
 
-  // 通道3：补丁 fetch（响应克隆后检查文本）
+  // 通道3：补丁 fetch
   function patchFetch() {
     var F = global.fetch;
     if (!F || F._iirosePatched) return;
@@ -611,13 +576,7 @@ function widgetMain(global) {
   };
 }
 
-/* ---------------- 启动与 iframe 自注入 ----------------
- * 网页版/桌面壳/官方APK 的聊天界面都在 <iframe id="mainFrame"> 内：
- * 插件若在顶层被加载（例如 iirose 插件/SCDN 系统），面板会被全屏 iframe 盖住，
- * 且顶层捕获不到 iframe 内的行情通道。此处把插件本体（widgetMain 源码）注入
- * iframe 同源文档运行：iframe 内自动挂面板 + 本地捕获数据。若注入失败则顶层兜底挂面板。
- * Tampermonkey 直接注入 iframe 的场景不受影响（iframe 副本自己挂面板）。
- * -------------------------------------------------------- */
+/* 启动与 iframe 自注入：顶层若存在聊天 iframe（mainFrame），把插件本体注入 iframe 内运行；注入失败则顶层兜底挂面板。 */
 if (typeof module === 'object' && module.exports) {
   if (typeof module.exports === 'undefined') module.exports = widgetMain(globalThis || {});
 }
