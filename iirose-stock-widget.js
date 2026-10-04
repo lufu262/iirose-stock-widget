@@ -620,13 +620,33 @@ function widgetMain(global) {
     });
   }
 
+  // 枚举窗口任意位置的 WebSocket 实例（覆盖 socket/ws/自定义变量名）
+  function findWS(w) {
+    try {
+      if (!w) return null;
+      var c = w.socket;
+      if (c && c.readyState === 1 && Object.prototype.toString.call(c) === '[object WebSocket]') return c;
+      c = w.ws;
+      if (c && c.readyState === 1 && Object.prototype.toString.call(c) === '[object WebSocket]') return c;
+      if (w.WebSocket) {
+        for (var k in w) {
+          try {
+            var v = w[k];
+            if (v && v.readyState === 1 && Object.prototype.toString.call(v) === '[object WebSocket]') return v;
+          } catch (e2) {}
+        }
+      }
+      return null;
+    } catch (e) { return null; }
+  }
   // 存量 socket 补救：插件晚于 WS 创建时加载（APK/网页常见），对已连接实例直接挂监听。
-  // 顶层兜底场景：socket 在 iframe(mainFrame) 内——跨窗口 addEventListener 同源可行，统一扫描所有 iframe
-  function hookSocket(s) {
+  // tag 区分 hook 来源（top/frame），顶层与 iframe 各自 hook 互不挡，双通道都收帧
+  function hookSocket(s, tag) {
     try {
       if (!s || typeof s.addEventListener !== 'function' || s.readyState !== 1) return false;
-      if (s.__iwHooked) return true;
-      s.__iwHooked = true;
+      var key = '__iwHooked_' + tag;
+      if (s[key]) return true;
+      s[key] = true;
       s.addEventListener('message', function (ev) {
         var d = ev && ev.data;
         if (typeof d === 'string') { handleText(d); }
@@ -643,20 +663,27 @@ function widgetMain(global) {
   }
   function patchExistingWS() {
     try {
-      var done = hookSocket(global.socket || global.ws || global.Socket);
+      var tag = isTop ? 'top' : 'frame';
+      var done = false;
+      var s = findWS(global);
+      if (s) done = hookSocket(s, tag);
       // 顶层：扫描所有 iframe 内的 socket（APK 兜底面板场景）
-      try {
-        if (global.document && global.document.querySelectorAll) {
-          var fs = global.document.querySelectorAll('iframe');
-          for (var i = 0; i < fs.length; i++) {
-            try {
-              var fw = fs[i].contentWindow;
-              if (fw && fw.socket && hookSocket(fw.socket)) done = true;
-              if (fw && fw.ws && hookSocket(fw.ws)) done = true;
-            } catch (e2) {}
+      if (isTop) {
+        try {
+          if (global.document && global.document.querySelectorAll) {
+            var fs = global.document.querySelectorAll('iframe');
+            for (var i = 0; i < fs.length; i++) {
+              try {
+                var fw = fs[i].contentWindow;
+                if (fw) {
+                  var ws = findWS(fw);
+                  if (ws && hookSocket(ws, 'top')) done = true;
+                }
+              } catch (e2) {}
+            }
           }
-        }
-      } catch (e3) {}
+        } catch (e3) {}
+      }
       return done;
     } catch (e) { return false; }
   }
