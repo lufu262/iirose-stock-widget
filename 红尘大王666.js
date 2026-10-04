@@ -54,7 +54,7 @@ function widgetMain(global) {
     lastEvt: '—',
     lastTsText: '—',
     connText: '等待数据…',
-    diag: { wsPatch: false, wsTop: false, wsFrame: false, xhr: false, fetch: false, bridge: false, frames: 0, texts: 0, errors: 0 }
+    diag: { wsPatch: false, wsTop: false, wsFrame: false, xhr: false, fetch: false, bridge: false, dom: false, frames: 0, texts: 0, errors: 0, wsInstances: 0, rawMsgs: 0, iframes: 0, socketVar: false }
   };
 
   /* ---------------- 帧解析 ---------------- */
@@ -418,7 +418,13 @@ function widgetMain(global) {
       if (d.xhr) parts.push('XHR✓');
       if (d.fetch) parts.push('Fetch✓');
       if (d.bridge) parts.push('桥✓');
-      $('iwDiag').textContent = (parts.length ? parts.join(' ') : '无通道!') + ' 帧' + d.frames;
+      if (d.dom) parts.push('DOM✓');
+      if (d.socketVar) parts.push('socket变量✓');
+      var extra = [];
+      if (d.wsInstances > 0) extra.push('WS' + d.wsInstances);
+      if (d.rawMsgs > 0) extra.push('原始' + d.rawMsgs);
+      if (d.iframes > 0) extra.push('帧数' + d.iframes);
+      $('iwDiag').textContent = (parts.length ? parts.join(' ') : '无通道!') + (extra.length ? ' ' + extra.join(' ') : '') + ' 帧' + d.frames;
       $('iwDiag').style.color = d.frames > 0 ? '#6ee7a0' : '#f87171';
     }
     if ($('iwPrice')) {
@@ -507,6 +513,33 @@ function widgetMain(global) {
     }
   }
 
+  // 通道5：MutationObserver 兜底——行情若以「股价提醒」等 UI 文本出现（APK 原生 WebView 常见），扫描 DOM 文本变化
+  function patchDOM() {
+    if (S.diag.dom || !global.document) return;
+    if (typeof MutationObserver === 'undefined' && typeof global.MutationObserver === 'undefined') return;
+    var MO = global.MutationObserver || MutationObserver;
+    var deb = null;
+    function scan() {
+      try {
+        var b = (global.document.body || global.document.documentElement);
+        if (!b) return;
+        var txt = b.innerText || '';
+        // 只看最近文本：截取尾部 4000 字符，避免整页扫描
+        var tail = txt.length > 4000 ? txt.slice(txt.length - 4000) : txt;
+        if (/股价[:：]/.test(tail)) handleText(tail);
+      } catch (e) {}
+    }
+    try {
+      var mo = new MO(function () {
+        if (deb) return;
+        deb = setTimeout(function () { deb = null; scan(); }, 300);
+      });
+      var target = (global.document.body || global.document.documentElement);
+      if (target) mo.observe(target, { childList: true, subtree: true, characterData: true });
+      S.diag.dom = true;
+    } catch (e) {}
+  }
+
   // 通道1：补丁 WebSocket
   // iirose WS = wss://m1.iirose.com/，消息为二进制：1 字节协议前缀 + gzip 压缩文本（或明文文本帧）
   function maybeB64(txt) {
@@ -558,6 +591,7 @@ function widgetMain(global) {
         var d = ev && ev.data;
         if (typeof d === 'string') { handleText(d); }
         else if (d != null) {
+          S.diag.rawMsgs++;
           decodeBinary(d).then(function (txt) { if (txt && typeof txt === 'string') handleText(txt); }).catch(function () {});
         }
         if (self.onmessage) { try { self.onmessage({ data: ev.data }); } catch (e) {} }
@@ -640,7 +674,7 @@ function widgetMain(global) {
     });
   }
 
-  // 枚举窗口任意位置的 WebSocket 实例（覆盖 socket/ws/自定义变量名）
+  // 枚举窗口任意位置的 WebSocket 实例（覆盖 socket/ws/自定义变量名/包装对象）
   function findWS(w) {
     try {
       if (!w) return null;
@@ -648,13 +682,18 @@ function widgetMain(global) {
       if (c && c.readyState === 1 && Object.prototype.toString.call(c) === '[object WebSocket]') return c;
       c = w.ws;
       if (c && c.readyState === 1 && Object.prototype.toString.call(c) === '[object WebSocket]') return c;
+      if (typeof w.socket !== 'undefined') S.diag.socketVar = true;
       if (w.WebSocket) {
+        var fallback = null;
         for (var k in w) {
           try {
             var v = w[k];
-            if (v && v.readyState === 1 && Object.prototype.toString.call(v) === '[object WebSocket]') return v;
+            if (!v || (typeof v !== 'object' && typeof v !== 'function')) continue;
+            if (v.readyState === 1 && Object.prototype.toString.call(v) === '[object WebSocket]') return v;
+            if (!fallback && v.readyState === 1 && typeof v.send === 'function' && typeof v.addEventListener === 'function') fallback = v;
           } catch (e2) {}
         }
+        if (fallback) return fallback;
       }
       return null;
     } catch (e) { return null; }
@@ -671,6 +710,7 @@ function widgetMain(global) {
         var d = ev && ev.data;
         if (typeof d === 'string') { handleText(d); }
         else if (d != null) {
+          S.diag.rawMsgs++;
           decodeBinary(d).then(function (txt) { if (txt && typeof txt === 'string') handleText(txt); }).catch(function () {});
         }
       });
@@ -679,6 +719,7 @@ function widgetMain(global) {
         s._iwQueryTimer = setInterval(function () { try { s.send('>#'); } catch (e) {} }, 60000);
       }
       if (tag === 'top') S.diag.wsTop = true; else S.diag.wsFrame = true;
+      S.diag.wsInstances++;
       return true;
     } catch (e) { return false; }
   }
@@ -693,6 +734,7 @@ function widgetMain(global) {
         try {
           if (global.document && global.document.querySelectorAll) {
             var fs = global.document.querySelectorAll('iframe');
+            S.diag.iframes = fs.length;
             for (var i = 0; i < fs.length; i++) {
               try {
                 var fw = fs[i].contentWindow;
@@ -717,7 +759,7 @@ function widgetMain(global) {
       };
       return 'bridge';
     }
-    patchWS(); patchXHR(); patchFetch(); listenBridge();
+    patchWS(); patchXHR(); patchFetch(); listenBridge(); patchDOM();
     patchExistingWS();
     return 'ws+xhr';
   }
