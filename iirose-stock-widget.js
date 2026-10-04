@@ -54,7 +54,8 @@ function widgetMain(global) {
     lastEvt: '—',
     lastTsText: '—',
     connText: '等待数据…',
-    diag: { wsPatch: false, wsTop: false, wsFrame: false, xhr: false, fetch: false, bridge: false, dom: false, frames: 0, domFrames: 0, texts: 0, errors: 0, wsInstances: 0, rawMsgs: 0, iframes: 0, socketVar: false, deepWs: 0, nativeBridge: null }
+    lastSource: null,       // 最近一帧数据来源：WS / DOM
+    diag: { wsPatch: false, wsTop: false, wsFrame: false, xhr: false, fetch: false, bridge: false, dom: false, frames: 0, domFrames: 0, texts: 0, errors: 0, wsInstances: 0, rawMsgs: 0, iframes: 0, socketVar: false, deepWs: 0, nativeBridge: null, queries: 0 }
   };
 
   /* ---------------- 帧解析 ---------------- */
@@ -437,6 +438,8 @@ function widgetMain(global) {
       if (d.domFrames > 0) extra.push('dom帧' + d.domFrames);
       if (d.iframes > 0) extra.push('帧数' + d.iframes);
       if (d.nativeBridge) extra.push('桥:' + d.nativeBridge);
+      if (d.queries > 0) extra.push('查' + d.queries);
+      if (S.lastSource) extra.push('源:' + S.lastSource);
       $('iwDiag').textContent = (parts.length ? parts.join(' ') : '无通道!') + (extra.length ? ' ' + extra.join(' ') : '') + ' 帧' + d.frames;
       $('iwDiag').style.color = d.frames > 0 ? '#6ee7a0' : '#f87171';
     }
@@ -501,7 +504,7 @@ function widgetMain(global) {
     else { var i = t.indexOf('>"'); if (i >= 0) seg = t.slice(i); }
     if (seg) {
       var st = parseFrame(seg);
-      if (st) { onFrame(st); passTop(t); return; }
+      if (st) { S.lastSource = 'WS'; onFrame(st); passTop(t); return; }
     }
     // 文本行情兜底：房间/机器人推送的「股价提醒」类消息（股价：x 总股：n 总金：y）
     var mPrice = /股价：([\d.]+)/.exec(t);
@@ -513,6 +516,7 @@ function widgetMain(global) {
       var mv = parseFloat(String(mMoney[1]).replace(/,/g, ''));
       if (!isNaN(pv) && !isNaN(sv) && !isNaN(mv) && sv > 0 && pv > 0) {
         S.diag.domFrames++;
+        S.lastSource = 'DOM';
         onFrame({
           totalStock: Math.round(sv), totalMoney: mv, unitPrice: pv,
           personalStock: null, personalMoney: null, hasPrice: true
@@ -785,6 +789,22 @@ function widgetMain(global) {
     } catch (e) { return false; }
   }
 
+  // 主动高频查询：只要页面存在 socket 变量（无论是否 hook 成功），每 10 秒 send('>#') 逼服务器回声。
+  // 覆盖「socket 存在但 hook 不上 / 数据靠 DOM 文本周期性渲染（APK 原生行情约 10 分钟刷新）」的场景
+  function activeQuery() {
+    var q = global.setInterval(function () {
+      try {
+        var s = null;
+        try { s = findWS(global); } catch (e) {}
+        if (!s && typeof global.socket !== 'undefined' && global.socket && typeof global.socket.send === 'function') s = global.socket;
+        if (s && typeof s.send === 'function') {
+          try { s.send('>#'); S.diag.queries++; } catch (e) {}
+        }
+      } catch (e) {}
+    }, 10000);
+    return q;
+  }
+
   function setupSource() {
     if (global.iiStockSource && typeof global.iiStockSource.onFrame === 'function') {
       global.iiStockSource.onFrame = function (text) {
@@ -795,6 +815,7 @@ function widgetMain(global) {
     }
     patchWS(); patchXHR(); patchFetch(); listenBridge(); patchDOM();
     patchExistingWS();
+    activeQuery();
     return 'ws+xhr';
   }
 
