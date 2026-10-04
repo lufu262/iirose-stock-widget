@@ -53,7 +53,8 @@ function widgetMain(global) {
     intervals: [],          // 股价变化间隔序列（ms）
     lastEvt: '—',
     lastTsText: '—',
-    connText: '等待数据…'
+    connText: '等待数据…',
+    diag: { wsPatch: false, wsTop: false, wsFrame: false, xhr: false, fetch: false, bridge: false, frames: 0, texts: 0, errors: 0 }
   };
 
   /* ---------------- 帧解析 ---------------- */
@@ -107,6 +108,7 @@ function widgetMain(global) {
   /* ---------------- 数据引擎 ---------------- */
   function onFrame(st) {
     if (!st || st.totalStock == null || st.totalMoney == null) return;
+    S.diag.frames++;
     var lastT = S.ticks[S.ticks.length - 1];
     // 网页版轮询会重复推送相同帧：内容完全一致时忽略（不算变动、不记录）
     if (lastT && lastT.price === st.unitPrice && lastT.stock === st.totalStock && lastT.money === st.totalMoney) {
@@ -335,6 +337,7 @@ function widgetMain(global) {
       '<div class="iw-stat"><span>最新变化</span><b id="iwTs">—</b></div>' +
       '<div class="iw-stat"><span>本轮步数</span><b id="iwCycle">0</b></div>' +
       '<div class="iw-stat"><span>距下次变动</span><b id="iwNext">—</b></div>' +
+      '<div class="iw-stat iw-diag"><span>通道</span><b id="iwDiag">检测中…</b></div>' +
       '</div>' +
       '<div class="iw-chart" id="iwChart"><div class="iw-ph">等待行情数据…</div></div>' +
       '<div class="iw-cards">' +
@@ -357,6 +360,7 @@ function widgetMain(global) {
       '.iw-body{padding:8px 10px 10px}' +
       '.iw-stats{display:grid;grid-template-columns:1fr 1fr;gap:3px 10px;margin-bottom:6px}' +
       '.iw-stat{display:flex;justify-content:space-between;gap:6px;font-size:11px;color:#94a3b8}.iw-stat b{color:#e5e7eb;font-weight:600}' +
+      '.iw-diag{grid-column:1/3;font-size:10px;border-top:1px dashed rgba(148,163,184,.25);padding-top:3px;margin-top:2px}' +
       '.iw-chart{background:#0b1526;border:1px solid #1e293b;border-radius:8px;padding:4px;min-height:150px;margin-bottom:6px}' +
       '.iw-ph{height:150px;display:flex;align-items:center;justify-content:center;color:#475569;font-size:11.5px}' +
       '.iw-cards{display:flex;gap:6px;margin-bottom:6px}' +
@@ -405,6 +409,18 @@ function widgetMain(global) {
     if (connEl) connEl.textContent = S.running ? (S.lastEvt === 'R' ? '已同步·崩盘重置' : '已同步') : '等待数据…';
     if ($('iwTs')) $('iwTs').textContent = S.lastTsText;
     if ($('iwCycle')) $('iwCycle').textContent = String(S.cycleStep);
+    if ($('iwDiag')) {
+      var d = S.diag;
+      var parts = [];
+      if (d.wsPatch) parts.push('WS补丁✓');
+      if (d.wsTop) parts.push('存量✓');
+      if (d.wsFrame) parts.push('帧区✓');
+      if (d.xhr) parts.push('XHR✓');
+      if (d.fetch) parts.push('Fetch✓');
+      if (d.bridge) parts.push('桥✓');
+      $('iwDiag').textContent = (parts.length ? parts.join(' ') : '无通道!') + ' 帧' + d.frames;
+      $('iwDiag').style.color = d.frames > 0 ? '#6ee7a0' : '#f87171';
+    }
     if ($('iwPrice')) {
       $('iwPrice').textContent = st ? fmtP(st.unitPrice) : '—';
       $('iwPriceD').textContent = prevT ? pct(st.unitPrice, prevT.price) : '—';
@@ -565,6 +581,7 @@ function widgetMain(global) {
     PWS.CONNECTING = 0; PWS.OPEN = 1; PWS.CLOSING = 2; PWS.CLOSED = 3;
     PWS._iirosePatched = true;
     global.WebSocket = PWS;
+    S.diag.wsPatch = true;
   }
 
   // 通道2：补丁 XMLHttpRequest
@@ -586,6 +603,7 @@ function widgetMain(global) {
       return _send.apply(this, arguments);
     };
     X.prototype._iirosePatched = true;
+    S.diag.xhr = true;
   }
 
   // 通道3：补丁 fetch
@@ -604,11 +622,13 @@ function widgetMain(global) {
       });
     };
     global.fetch._iirosePatched = true;
+    S.diag.fetch = true;
   }
 
   // 通道4：iframe 转发接收（顶层监听）
   function listenBridge() {
     if (!isTop) return;
+    S.diag.bridge = true;
     global.addEventListener('message', function (e) {
       try {
         var d = e.data;
@@ -658,6 +678,7 @@ function widgetMain(global) {
       if (!s._iwQueryTimer) {
         s._iwQueryTimer = setInterval(function () { try { s.send('>#'); } catch (e) {} }, 60000);
       }
+      if (tag === 'top') S.diag.wsTop = true; else S.diag.wsFrame = true;
       return true;
     } catch (e) { return false; }
   }
@@ -710,15 +731,16 @@ function widgetMain(global) {
       if (Array.isArray(saved)) S.savedRounds = saved;
     } catch (e) {}
     setupSource();
-    // socket 晚出现时重试存量补救（最多 15 秒）
+    // socket 晚出现 / 重连后新 socket：持续重试存量补救（每 5 秒，收到帧后停止）
     var tries = 0;
     var retryTimer = global.setInterval(function () {
       tries++;
       try {
         var hooked = patchExistingWS();
-        if (hooked || tries >= 15) { global.clearInterval(retryTimer); }
-      } catch (e) { if (tries >= 15) { try { global.clearInterval(retryTimer); } catch (e2) {} } }
-    }, 1000);
+        if (hooked && S.diag.frames > 0) { global.clearInterval(retryTimer); }
+        else if (tries >= 40) { global.clearInterval(retryTimer); }
+      } catch (e) { if (tries >= 40) { try { global.clearInterval(retryTimer); } catch (e2) {} } }
+    }, 5000);
     if (!isTop) { buildUI(); return; }
     var hasFrame = false;
     try { hasFrame = !!(document.getElementById('mainFrame') || (document.querySelector ? document.querySelector('iframe#mainFrame') : null)); } catch (e) {}
