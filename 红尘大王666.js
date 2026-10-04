@@ -30,10 +30,7 @@
  *   本轮起点：股价=1、总股=1000、总金=1000；崩盘重置判定：
  *   unitPrice===1 && totalStock===1000
  * ============================================================ */
-(function (root, factory) {
-  if (typeof module === 'object' && module.exports) { module.exports = factory(root); }
-  else { var w = factory(root); root.IiStockWidget = w; if (typeof root.document !== 'undefined' && root.document.readyState !== 'loading') { w.autoStart(); } else if (typeof root.addEventListener === 'function') { root.addEventListener('DOMContentLoaded', function () { try { w.autoStart(); } catch (e) {} }); } }
-})(typeof self !== 'undefined' ? self : this, function (global) {
+function widgetMain(global) {
   'use strict';
 
   /* ---------------- 配置与常量 ---------------- */
@@ -595,7 +592,10 @@
       if (Array.isArray(saved)) S.savedRounds = saved;
     } catch (e) {}
     setupSource();
-    buildUI();
+    if (!isTop) { buildUI(); return; }
+    var hasFrame = false;
+    try { hasFrame = !!(document.getElementById('mainFrame') || (document.querySelector ? document.querySelector('iframe#mainFrame') : null)); } catch (e) {}
+    if (!hasFrame) buildUI();
   }
 
   return {
@@ -604,6 +604,60 @@
     pushFrame: function (text) { var st = parseFrame(text); if (st) onFrame(st); return !!st; },
     getState: function () { return S; },
     exportAll: exportAll,
-    parseFrame: parseFrame
+    parseFrame: parseFrame,
+    ensureUI: function () { buildUI(); }
   };
-});
+}
+
+/* ---------------- 启动与 iframe 自注入 ----------------
+ * 网页版/桌面壳/官方APK 的聊天界面都在 <iframe id="mainFrame"> 内：
+ * 插件若在顶层被加载（例如 iirose 插件/SCDN 系统），面板会被全屏 iframe 盖住，
+ * 且顶层捕获不到 iframe 内的行情通道。此处把插件本体（widgetMain 源码）注入
+ * iframe 同源文档运行：iframe 内自动挂面板 + 本地捕获数据。若注入失败则顶层兜底挂面板。
+ * Tampermonkey 直接注入 iframe 的场景不受影响（iframe 副本自己挂面板）。
+ * -------------------------------------------------------- */
+if (typeof module === 'object' && module.exports) {
+  if (typeof module.exports === 'undefined') module.exports = widgetMain(globalThis || {});
+}
+(function (root) {
+  try {
+    var w = widgetMain(root);
+    root.IiStockWidget = w;
+    var booted = false;
+    function boot() {
+      if (booted) return; booted = true;
+      try { w.autoStart(); } catch (e) {}
+    }
+    if (typeof root.document !== 'undefined' && root.document.readyState !== 'loading') { boot(); }
+    else if (typeof root.addEventListener === 'function') { root.addEventListener('DOMContentLoaded', function () { boot(); }); }
+    else { try { boot(); } catch (e) {} }
+    var isTop = true;
+    try { isTop = root.self === root.top || root.top === root.self; } catch (e) {}
+    if (isTop && typeof root.document !== 'undefined') {
+      var tries = 0, timer = null, injected = false;
+      function injectOnce() {
+        try {
+          var f = root.document.getElementById('mainFrame') || (root.document.querySelector ? root.document.querySelector('iframe#mainFrame') : null);
+          if (!f) return false;
+          var fw = f.contentWindow;
+          if (!fw || !fw.document || !fw.document.createElement) return false;
+          if (fw.__iiWidgetInjected) return true;
+          if (fw.document.querySelector && fw.document.querySelector('.iw-wrap')) { fw.__iiWidgetInjected = true; return true; }
+          var payload = 'var widgetMain=' + widgetMain.toString() + ';(function(root){var w=widgetMain(root);root.IiStockWidget=w;if(root.document&&root.document.readyState!=="loading"){try{w.autoStart();}catch(e){}}else if(root.addEventListener){root.addEventListener("DOMContentLoaded",function(){try{w.autoStart();}catch(e){}});}})(self);';
+          var s = fw.document.createElement('script');
+          s.textContent = payload;
+          (fw.document.head || fw.document.documentElement).appendChild(s);
+          fw.__iiWidgetInjected = true;
+          return true;
+        } catch (e) { return false; }
+      }
+      function loop() {
+        if (injectOnce()) { if (timer) { try { root.clearTimeout(timer); } catch (e) {} } return; }
+        tries++;
+        if (tries >= 40) { try { w.ensureUI(); } catch (e) {} return; }  // 约20s后兜底
+        if (root.setTimeout) { timer = root.setTimeout(loop, 500); }
+      }
+      if (root.setTimeout) { timer = root.setTimeout(loop, 600); }
+    }
+  } catch (e) {}
+})(typeof self !== 'undefined' ? self : this);
