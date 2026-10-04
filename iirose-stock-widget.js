@@ -504,7 +504,16 @@ function widgetMain(global) {
     else { var i = t.indexOf('>"'); if (i >= 0) seg = t.slice(i); }
     if (seg) {
       var st = parseFrame(seg);
-      if (st) { S.lastSource = 'WS'; onFrame(st); passTop(t); return; }
+      if (st) {
+        var k0 = JSON.stringify([st.unitPrice, st.totalStock, st.totalMoney]);
+        if (k0 !== S.lastKey) {
+          S.lastKey = k0;
+          S.lastSource = 'WS';
+          onFrame(st);
+          passTop(t);
+        }
+        return;
+      }
     }
     // 文本行情兜底：房间/机器人推送的「股价提醒」类消息（股价：x 总股：n 总金：y）
     var mPrice = /股价：([\d.]+)/.exec(t);
@@ -515,13 +524,18 @@ function widgetMain(global) {
       var sv = parseFloat(String(mStock[1]).replace(/,/g, ''));
       var mv = parseFloat(String(mMoney[1]).replace(/,/g, ''));
       if (!isNaN(pv) && !isNaN(sv) && !isNaN(mv) && sv > 0 && pv > 0) {
-        S.diag.domFrames++;
-        S.lastSource = 'DOM';
-        onFrame({
-          totalStock: Math.round(sv), totalMoney: mv, unitPrice: pv,
-          personalStock: null, personalMoney: null, hasPrice: true
-        });
-        passTop(t);
+        // 去重：三值相同视为同帧（1s 轮询/多通道重复投递不重复入帧）
+        var k = pv + '|' + Math.round(sv) + '|' + mv;
+        if (k !== S.lastKey) {
+          S.lastKey = k;
+          S.diag.domFrames++;
+          S.lastSource = 'DOM';
+          onFrame({
+            totalStock: Math.round(sv), totalMoney: mv, unitPrice: pv,
+            personalStock: null, personalMoney: null, hasPrice: true
+          });
+          passTop(t);
+        }
       }
     }
   }
@@ -531,31 +545,33 @@ function widgetMain(global) {
     }
   }
 
-  // 通道5：MutationObserver 兜底——行情若以「股价提醒」等 UI 文本出现（APK 原生 WebView 常见），扫描 DOM 文本变化
+  // 通道5：DOM 兜底——行情以「股价提醒」等 UI 文本出现时（APK 原生 WebView 常见），抓取页面文本。
+  // MutationObserver + 每秒全文轮询双保险：原生 evaluateJavascript 直改文本等 observer 漏触发场景靠轮询兜住
   function patchDOM() {
     if (S.diag.dom || !global.document) return;
-    if (typeof MutationObserver === 'undefined' && typeof global.MutationObserver === 'undefined') return;
     var MO = global.MutationObserver || MutationObserver;
-    var deb = null;
     function scan() {
       try {
         var b = (global.document.body || global.document.documentElement);
         if (!b) return;
         var txt = b.innerText || '';
-        // 只看最近文本：截取尾部 4000 字符，避免整页扫描
-        var tail = txt.length > 4000 ? txt.slice(txt.length - 4000) : txt;
-        if (/股价[:：]/.test(tail)) handleText(tail);
+        if (/股价[:：]/.test(txt)) {
+          // 取最后一段「股价：」行情文本（含前后上下文），喂 handleText（内部有去重）
+          var idx = txt.lastIndexOf('股价');
+          var chunk = txt.slice(Math.max(0, idx - 80), Math.min(txt.length, idx + 400));
+          handleText(chunk);
+        }
       } catch (e) {}
     }
     try {
-      var mo = new MO(function () {
-        if (deb) return;
-        deb = setTimeout(function () { deb = null; scan(); }, 300);
-      });
-      var target = (global.document.body || global.document.documentElement);
-      if (target) mo.observe(target, { childList: true, subtree: true, characterData: true });
+      if (MO) {
+        var mo = new MO(function () { scan(); });
+        var target = (global.document.body || global.document.documentElement);
+        if (target) mo.observe(target, { childList: true, subtree: true, characterData: true });
+      }
       S.diag.dom = true;
     } catch (e) {}
+    global.setInterval(scan, 1000);
   }
 
   // 通道1：补丁 WebSocket
