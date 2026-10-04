@@ -602,6 +602,28 @@ function widgetMain(global) {
     });
   }
 
+  // 存量 socket 补救：插件晚于 WS 创建时加载（APK/网页常见），对已连接实例直接挂监听
+  function patchExistingWS() {
+    try {
+      var s = global.socket || global.ws || global.Socket;
+      if (!s || typeof s.addEventListener !== 'function' || s.readyState !== 1) return false;
+      if (s.__iwHooked) return true;
+      s.__iwHooked = true;
+      s.addEventListener('message', function (ev) {
+        var d = ev && ev.data;
+        if (typeof d === 'string') { handleText(d); }
+        else if (d != null) {
+          decodeBinary(d).then(function (txt) { if (txt && typeof txt === 'string') handleText(txt); }).catch(function () {});
+        }
+      });
+      try { s.send('>#'); } catch (e) {}
+      if (!s._iwQueryTimer) {
+        s._iwQueryTimer = setInterval(function () { try { s.send('>#'); } catch (e) {} }, 60000);
+      }
+      return true;
+    } catch (e) { return false; }
+  }
+
   function setupSource() {
     if (global.iiStockSource && typeof global.iiStockSource.onFrame === 'function') {
       global.iiStockSource.onFrame = function (text) {
@@ -611,6 +633,7 @@ function widgetMain(global) {
       return 'bridge';
     }
     patchWS(); patchXHR(); patchFetch(); listenBridge();
+    patchExistingWS();
     return 'ws+xhr';
   }
 
@@ -623,6 +646,15 @@ function widgetMain(global) {
       if (Array.isArray(saved)) S.savedRounds = saved;
     } catch (e) {}
     setupSource();
+    // socket 晚出现时重试存量补救（最多 15 秒）
+    var tries = 0;
+    var retryTimer = global.setInterval(function () {
+      tries++;
+      try {
+        var hooked = patchExistingWS();
+        if (hooked || tries >= 15) { global.clearInterval(retryTimer); }
+      } catch (e) { if (tries >= 15) { try { global.clearInterval(retryTimer); } catch (e2) {} } }
+    }, 1000);
     if (!isTop) { buildUI(); return; }
     var hasFrame = false;
     try { hasFrame = !!(document.getElementById('mainFrame') || (document.querySelector ? document.querySelector('iframe#mainFrame') : null)); } catch (e) {}
